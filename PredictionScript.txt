@@ -1,0 +1,126 @@
+# ============================================================
+# PredictionScript.txt
+# Kocaeli Üniversitesi - Yazılım Laboratuvarı II - Proje III
+# Öğrenci: Mervan Elbahadır (230202075), Gökhan Özdemir (230202077)
+# Google Colab ortamında Python 3 ile çalışacak şekilde hazırlanmıştır.
+# ============================================================
+
+# Gerekli kütüphanelerin kurulumu
+!pip install torch torchvision pillow
+
+# ---- Import ----
+import os
+import torch
+import torch.nn as nn
+import torchvision.models as models
+from torchvision import transforms
+from PIL import Image
+
+# ============================================================
+# Model dosyasının yolu (script ile aynı dizinde olmalı)
+# Colab'a yüklerken zip içindeki klasör adı: 230202075_230202077
+# ============================================================
+SCRIPT_DIR = "/content/230202075_230202077"
+CKPT_PATH  = os.path.join(SCRIPT_DIR, "car_body_classifier.pt")
+
+# ---- Cihaz seçimi ----
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"[INFO] Cihaz: {device}")
+
+
+# ---- Model mimarisi (train.py ile birebir aynı) ----
+def build_model(num_classes=8, dropout=0.3):
+    model = models.mobilenet_v3_large(weights=None)
+    in_features = model.classifier[0].in_features   # 960
+    model.classifier = nn.Sequential(
+        nn.Linear(in_features, 1280),
+        nn.Hardswish(inplace=True),
+        nn.Dropout(p=dropout, inplace=True),
+        nn.Linear(1280, num_classes),
+    )
+    return model
+
+
+# ---- Model yükleme ----
+ckpt = torch.load(CKPT_PATH, map_location=device)
+model = build_model(num_classes=len(ckpt["folder_classes"]), dropout=0.3).to(device)
+model.load_state_dict(ckpt["state_dict"])
+model.eval()
+print(f"[OK] Model yüklendi: {CKPT_PATH}")
+
+# ---- Dönüşüm (eğitimle birebir aynı) ----
+IMG_SIZE      = ckpt.get("img_size", 224)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD  = (0.229, 0.224, 0.225)
+
+TF = transforms.Compose([
+    transforms.Resize(int(IMG_SIZE * 1.14)),
+    transforms.CenterCrop(IMG_SIZE),
+    transforms.ToTensor(),
+    transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+])
+
+# idx_to_label: model çıkış indeksi -> proje etiketi (1-8)
+IDX_TO_LABEL = {int(k): int(v) for k, v in ckpt["idx_to_label"].items()}
+
+# Desteklenen görüntü uzantıları
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+# ============================================================
+# ZORUNLU FONKSİYON
+# file_path: testdata/ klasörünün tam yolu
+# Test klasörü yapısı: testdata/1/... testdata/2/... ... testdata/8/...
+# ============================================================
+def Predict(file_path):
+
+    image_names = []
+    preds = []
+
+    # testdata/ altındaki tüm alt klasörleri (1-8) tara
+    for subfolder in sorted(os.listdir(file_path)):
+        subfolder_path = os.path.join(file_path, subfolder)
+        if not os.path.isdir(subfolder_path):
+            continue
+
+        for img_file in sorted(os.listdir(subfolder_path)):
+            ext = os.path.splitext(img_file)[1].lower()
+            if ext not in IMG_EXTS:
+                continue
+
+            img_path = os.path.join(subfolder_path, img_file)
+
+            try:
+                img = Image.open(img_path).convert("RGB")
+            except Exception as e:
+                print(f"[HATA] {img_file}: {e}")
+                continue
+
+            with torch.no_grad():
+                x      = TF(img).unsqueeze(0).to(device)
+                logits = model(x)
+                idx    = int(torch.argmax(logits, dim=1).item())
+
+            label = IDX_TO_LABEL[idx]   # 1-8 proje etiketi
+
+            image_names.append(img_file)
+            preds.append(label)
+
+    # ---- Preds.txt yaz ----
+    # FORMAT BİREBİR AYNI: "filename.ext | Pred: N "
+    filename = "/content/Preds.txt"
+    f = open(filename, "w", encoding="utf-8")
+
+    for i in range(len(preds)):
+        line = (
+            f"{image_names[i]} | Pred: {preds[i]} "
+        )
+        print(line)
+        f.write(line + "\n")
+
+    f.close()
+    print(f"\n[OK] {len(preds)} tahmin -> {filename}")
+
+
+# ---- Colab'da test etmek için ----
+# Predict("/content/testdata")
